@@ -302,13 +302,11 @@ def register_single_thread(debug_mode=False, single_run=False):
                                 user_agent=account_user_agent,
                             )
                             nsfw_hex = nsfw_result.get("hex_reply") or ""
+                            nsfw_ok = nsfw_result.get("ok", False)
                             if debug_mode:
-                                print(f"[DEBUG] [{thread_id}] NSFW 结果: ok={nsfw_result.get('ok')}, hex={nsfw_hex[:20] if nsfw_hex else None}...")
-                            if not nsfw_result.get("ok") or not nsfw_hex:
-                                print(f"[-] [{thread_id}] NSFW 启用失败")
-                                email_service.delete_email(email)
-                                current_email = None
-                                break
+                                print(f"[DEBUG] [{thread_id}] NSFW 结果: ok={nsfw_ok}, hex={nsfw_hex[:20] if nsfw_hex else None}...")
+                            if not nsfw_ok:
+                                print(f"[!] [{thread_id}] NSFW 启用失败，但继续保存账号")
 
                             # 立即进行二次验证 (enable_unhinged)
                             if debug_mode:
@@ -317,6 +315,10 @@ def register_single_thread(debug_mode=False, single_run=False):
                             unhinged_ok = unhinged_result.get("ok", False)
                             if debug_mode:
                                 print(f"[DEBUG] [{thread_id}] Unhinged 结果: ok={unhinged_ok}")
+                            
+                            # NSFW 和 Unhinged 失败不阻断主流程
+                            if not unhinged_ok:
+                                print(f"[!] [{thread_id}] Unhinged 启用失败")
 
                             with file_lock:
                                 global success_count
