@@ -63,6 +63,7 @@ cp .env.example .env
 | WORKER_DOMAIN | freemail 服务域名 |
 | FREEMAIL_TOKEN | freemail JWT Token |
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
+| PROXY_URL | 代理地址（可选，支持 http/https/socks4/socks5） |
 
 ## 使用
 
@@ -115,6 +116,25 @@ Grok 注册机
 [*] 开始二次验证 NSFW...
 [*] 二次验证完成: 10/10
 ```
+
+## 代理配置（可选）
+
+如需使用代理，在 `.env` 中配置 `PROXY_URL`：
+
+```bash
+# HTTP 代理
+PROXY_URL=http://127.0.0.1:7890
+
+# SOCKS5 代理
+PROXY_URL=socks5://127.0.0.1:10808
+
+# 带认证的代理
+PROXY_URL=http://user:pass@127.0.0.1:7890
+```
+
+启动时会显示代理状态：
+- `[*] 使用代理: socks5://127.0.0.1:10808`
+- `[*] 未配置代理，使用直连`
 
 ## 注意事项
 
