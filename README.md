@@ -29,8 +29,8 @@
 
 ## 依赖
 
-- [freemail](https://github.com/user/freemail) - 临时邮箱服务（需自行部署）
-- Turnstile Solver - 内置验证码解决方案
+- [freemail](https://github.com/idinging/freemail) - 临时邮箱服务（需自行部署）
+- ~~Turnstile Solver - 内置验证码解决方案~~
 
 ## 安装
 
@@ -62,7 +62,7 @@ cp .env.example .env
 |--------|------|
 | WORKER_DOMAIN | freemail 服务域名 |
 | FREEMAIL_TOKEN | freemail JWT Token |
-| YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
+| YESCAPTCHA_KEY | YesCaptcha API Key（推荐，不填使用本地 Solver） |
 | PROXY_URL | 代理地址（可选，支持 http/https/socks4/socks5） |
 
 ## 使用
@@ -139,5 +139,5 @@ PROXY_URL=http://user:pass@127.0.0.1:7890
 ## 注意事项
 
 - 需要自行部署 freemail 临时邮箱服务
-- 运行前必须先启动 Turnstile Solver
+- ~~运行前必须先启动 Turnstile Solver~~
 - 仅供学习研究使用
