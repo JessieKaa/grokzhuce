@@ -18,3 +18,7 @@ keys/
 .ace-tool/
 .claude/
 .playwright-mcp/
+.venv/
+uv.lock
+.specstory/
+.python-version

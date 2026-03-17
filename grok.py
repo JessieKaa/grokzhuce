@@ -22,6 +22,10 @@ else:
     PROXIES = {}
     print("[*] 未配置代理，使用直连")
 
+# Go IMAP 服务配置
+GO_IMAP_SERVICE_URL = os.getenv("GO_IMAP_SERVICE_URL", "").strip()
+USE_GO_IMAP = os.getenv("USE_GO_IMAP", "auto").strip().lower()  # auto, true, false
+
 # 基础配置
 # 基础 URL（用于 API 请求和 Solver）
 base_url = "https://accounts.x.ai"
@@ -119,6 +123,105 @@ def verify_email_code_grpc(session, email, code, debug_mode=False):
         print(f"[-] {email} 验证验证码异常: {e}")
         return False
 
+def get_code_via_go_service(email, timeout=120, debug_mode=False):
+    """通过 Go IMAP 服务获取验证码"""
+    if not GO_IMAP_SERVICE_URL:
+        if debug_mode:
+            print(f"[DEBUG] [{email}] GO_IMAP_SERVICE_URL 未配置")
+        return None
+
+    endpoint = f"{GO_IMAP_SERVICE_URL.rstrip('/')}/code"
+    try:
+        with requests.Session(impersonate="chrome120", proxies=PROXIES) as session:
+            for sec in range(max(1, timeout)):
+                try:
+                    params = {
+                        "email": email,
+                        "allow_fallback": "0",
+                        "consume": "1",
+                        "rescan": "0",
+                    }
+                    resp = session.get(endpoint, params=params, timeout=8)
+                    if resp.status_code != 200:
+                        if debug_mode and sec % 10 == 0:
+                            print(f"[DEBUG] [{email}] GET /code status={resp.status_code}")
+                    else:
+                        data = resp.json()
+                        if data.get("ok") and data.get("code"):
+                            if debug_mode:
+                                print(f"[DEBUG] [{email}] Go IMAP 获取到验证码: {data.get('code')} uid={data.get('uid')}")
+                            return str(data["code"]).strip()
+                except Exception as poll_error:
+                    if debug_mode and sec % 10 == 0:
+                        print(f"[DEBUG] [{email}] Go IMAP 轮询异常: {poll_error}")
+
+                if sec % 5 == 0 and debug_mode:
+                    print(f"[DEBUG] [{email}] Go IMAP 轮询中... {sec}s")
+                time.sleep(1)
+
+            if debug_mode:
+                print(f"[DEBUG] [{email}] Go IMAP 超时，未获取到验证码")
+            return None
+    except Exception as e:
+        if debug_mode:
+            print(f"[DEBUG] [{email}] Go IMAP 异常: {e}")
+        return None
+
+def get_verification_code(email, email_service, timeout=120, debug_mode=False):
+    """
+    统一的验证码获取接口
+
+    根据 USE_GO_IMAP 环境变量决定使用哪种方式：
+    - "true": 仅使用 Go IMAP
+    - "false": 仅使用 FreeMail
+    - "auto": 优先 Go IMAP，失败则回退到 FreeMail（默认）
+    """
+    if USE_GO_IMAP == "true":
+        # 仅使用 Go IMAP
+        if debug_mode:
+            print(f"[DEBUG] [{email}] 使用 Go IMAP 服务获取验证码")
+        return get_code_via_go_service(email, timeout, debug_mode)
+
+    elif USE_GO_IMAP == "false":
+        # 仅使用 FreeMail
+        if debug_mode:
+            print(f"[DEBUG] [{email}] 使用 FreeMail 服务获取验证码")
+        if email_service:
+            return email_service.fetch_verification_code(email, debug=debug_mode)
+        else:
+            print(f"[-] [{email}] EmailService 未初始化")
+            return None
+
+    else:  # "auto" 或其他值
+        # 自动选择：优先 Go IMAP，失败则回退到 FreeMail
+        if GO_IMAP_SERVICE_URL:
+            if debug_mode:
+                print(f"[DEBUG] [{email}] 尝试使用 Go IMAP 服务获取验证码")
+            code = get_code_via_go_service(email, timeout, debug_mode)
+            if code:
+                return code
+            if debug_mode:
+                print(f"[DEBUG] [{email}] Go IMAP 失败，回退到 FreeMail")
+
+        if debug_mode:
+            print(f"[DEBUG] [{email}] 使用 FreeMail 服务获取验证码")
+        if email_service:
+            return email_service.fetch_verification_code(email, debug=debug_mode)
+        else:
+            print(f"[-] [{email}] EmailService 未初始化且 Go IMAP 不可用")
+            return None
+
+def safe_delete_email(email_service, email, debug_mode=False):
+    """安全地删除邮箱（仅在使用 FreeMail 时）"""
+    if email_service and email and USE_GO_IMAP != "true":
+        try:
+            safe_delete_email(email_service, email, debug_mode)
+            if debug_mode:
+                print(f"[DEBUG] 已删除邮箱: {email}")
+        except Exception as e:
+            if debug_mode:
+                print(f"[DEBUG] 删除邮箱失败: {e}")
+
 def register_single_thread(debug_mode=False, single_run=False):
     thread_id = threading.current_thread().name
     # 错峰启动，防止瞬时并发过高
@@ -127,10 +230,33 @@ def register_single_thread(debug_mode=False, single_run=False):
         print(f"[DEBUG] [{thread_id}] 线程启动，错峰等待 {sleep_time:.2f}s")
     time.sleep(sleep_time)
 
+    # 根据配置决定是否需要初始化 EmailService
+    email_service = None
+    need_email_service = (USE_GO_IMAP != "true")  # 仅在非纯 Go IMAP 模式下需要
+
     try:
         if debug_mode:
             print(f"[DEBUG] [{thread_id}] 正在初始化服务...")
-        email_service = EmailService()
+
+        # 只在需要时初始化 EmailService
+        if need_email_service:
+            try:
+                email_service = EmailService()
+                if debug_mode:
+                    print(f"[DEBUG] [{thread_id}] EmailService 初始化成功")
+            except Exception as e:
+                if USE_GO_IMAP == "false":
+                    # 如果强制使用 FreeMail 但初始化失败，则报错退出
+                    print(f"[-] [{thread_id}] EmailService 初始化失败: {e}")
+                    if debug_mode:
+                        traceback.print_exc()
+                    return
+                else:
+                    # auto 模式下，EmailService 初始化失败不影响，可以用 Go IMAP
+                    if debug_mode:
+                        print(f"[DEBUG] [{thread_id}] EmailService 初始化失败，将仅使用 Go IMAP: {e}")
+                    email_service = None
+
         turnstile_service = TurnstileService()
         user_agreement_service = UserAgreementService()
         nsfw_service = NsfwSettingsService()
@@ -149,13 +275,13 @@ def register_single_thread(debug_mode=False, single_run=False):
         return
 
     current_email = None  # 追踪当前邮箱，确保异常时能删除
+    use_freemail = (USE_GO_IMAP != "true")  # 是否使用 FreeMail 创建临时邮箱
 
     while True:
         try:
             if stop_event.is_set():
-                if current_email:
-                    try: email_service.delete_email(current_email)
-                    except: pass
+                if current_email and use_freemail:
+                    safe_delete_email(email_service, current_email, debug_mode)
                 return
             impersonate_fingerprint, account_user_agent = get_random_chrome_profile()
             with requests.Session(impersonate=impersonate_fingerprint, proxies=PROXIES) as session:
@@ -165,25 +291,42 @@ def register_single_thread(debug_mode=False, single_run=False):
 
                 password = generate_random_string()
 
-                try:
-                    if debug_mode:
-                        print(f"[DEBUG] [{thread_id}] 正在创建临时邮箱...")
-                    jwt, email = email_service.create_email()
+                # 获取邮箱地址
+                if use_freemail and email_service:
+                    # 使用 FreeMail 创建临时邮箱
+                    try:
+                        if debug_mode:
+                            print(f"[DEBUG] [{thread_id}] 正在创建临时邮箱...")
+                        jwt, email = email_service.create_email()
+                        current_email = email
+                        if debug_mode:
+                            print(f"[DEBUG] [{thread_id}] 邮箱创建成功: {email}")
+                    except Exception as e:
+                        print(f"[-] [{thread_id}] 邮箱服务抛出异常: {e}")
+                        if debug_mode:
+                            traceback.print_exc()
+                        jwt, email, current_email = None, None, None
+
+                    if not email:
+                        print(f"[-] [{thread_id}] 邮箱创建失败，5秒后重试...")
+                        time.sleep(5)
+                        continue
+                else:
+                    # 使用 Go IMAP，从环境变量获取邮箱
+                    email_domain = os.getenv("EMAIL_DOMAIN", "")
+                    if not email_domain:
+                        print(f"[-] [{thread_id}] 使用 Go IMAP 模式但未配置 EMAIL_DOMAIN 环境变量")
+                        return
+
+                    # 生成随机邮箱前缀
+                    email_prefix = generate_random_string(10)
+                    email = f"{email_prefix}@{email_domain}"
                     current_email = email
                     if debug_mode:
-                        print(f"[DEBUG] [{thread_id}] 邮箱创建成功: {email}")
-                except Exception as e:
-                    print(f"[-] [{thread_id}] 邮箱服务抛出异常: {e}")
-                    if debug_mode:
-                        traceback.print_exc()
-                    jwt, email, current_email = None, None, None
-
-                if not email:
-                    print(f"[-] [{thread_id}] 邮箱创建失败，5秒后重试...")
-                    time.sleep(5); continue
+                        print(f"[DEBUG] [{thread_id}] 使用邮箱: {email}")
 
                 if stop_event.is_set():
-                    email_service.delete_email(email)
+                    safe_delete_email(email_service, email, debug_mode)
                     current_email = None
                     return
 
@@ -194,21 +337,22 @@ def register_single_thread(debug_mode=False, single_run=False):
                     print(f"[DEBUG] [{thread_id}] Step 1: 发送验证码...")
                 if not send_email_code_grpc(session, email, debug_mode):
                     print(f"[-] [{thread_id}] 发送验证码失败，删除邮箱: {email}")
-                    email_service.delete_email(email)
+                    safe_delete_email(email_service, email, debug_mode)
                     current_email = None
-                    time.sleep(5); continue
+                    time.sleep(5)
+                    continue
                 if debug_mode:
                     print(f"[DEBUG] [{thread_id}] 验证码发送成功")
 
                 # Step 2: 获取验证码
                 if debug_mode:
                     print(f"[DEBUG] [{thread_id}] Step 2: 获取验证码...")
-                verify_code = email_service.fetch_verification_code(email, debug=debug_mode)
+                verify_code = get_verification_code(email, email_service, timeout=120, debug_mode=debug_mode)
                 if debug_mode:
                     print(f"[DEBUG] [{thread_id}] 获取到验证码: {verify_code}")
                 if not verify_code:
                     print(f"[-] [{thread_id}] 获取验证码失败，删除邮箱: {email}")
-                    email_service.delete_email(email)
+                    safe_delete_email(email_service, email, debug_mode)
                     current_email = None
                     continue
 
@@ -217,7 +361,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                     print(f"[DEBUG] [{thread_id}] Step 3: 验证验证码...")
                 if not verify_email_code_grpc(session, email, verify_code, debug_mode):
                     print(f"[-] [{thread_id}] 验证验证码失败，删除邮箱: {email}")
-                    email_service.delete_email(email)
+                    safe_delete_email(email_service, email, debug_mode)
                     current_email = None
                     continue
                 if debug_mode:
@@ -230,7 +374,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                     if debug_mode:
                         print(f"[DEBUG] [{thread_id}] 注册尝试 {attempt + 1}/3")
                     if stop_event.is_set():
-                        email_service.delete_email(email)
+                        safe_delete_email(email_service, email, debug_mode)
                         current_email = None
                         return
                     if debug_mode:
@@ -270,7 +414,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                         match = re.search(r'(https://[^" \s]+set-cookie\?q=[^:" \s]+)1:', res.text)
                         if not match:
                             print(f"[-] [{thread_id}] 未找到 verify_url，响应: {res.text[:200]}...")
-                            email_service.delete_email(email)
+                            safe_delete_email(email_service, email, debug_mode)
                             current_email = None
                             break
                         if match:
@@ -282,7 +426,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                                 print(f"[DEBUG] [{thread_id}] SSO: {sso[:20] if sso else None}..., sso-rw: {'存在' if sso_rw else '无'}")
                             if not sso:
                                 print(f"[-] [{thread_id}] 未获取到 SSO cookie")
-                                email_service.delete_email(email)
+                                safe_delete_email(email_service, email, debug_mode)
                                 current_email = None
                                 break
 
@@ -300,7 +444,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                                 print(f"[DEBUG] [{thread_id}] TOS 结果: ok={tos_result.get('ok')}, hex={tos_hex[:20] if tos_hex else None}...")
                             if not tos_result.get("ok") or not tos_hex:
                                 print(f"[-] [{thread_id}] TOS 接受失败")
-                                email_service.delete_email(email)
+                                safe_delete_email(email_service, email, debug_mode)
                                 current_email = None
                                 break
 
@@ -342,21 +486,21 @@ def register_single_thread(debug_mode=False, single_run=False):
                                     if not stop_event.is_set():
                                         stop_event.set()
                                     print(f"[*] 已达到目标数量，删除邮箱: {email}")
-                                    email_service.delete_email(email)
+                                    safe_delete_email(email_service, email, debug_mode)
                                     current_email = None
                                     break
                                 try:
                                     with open(output_file, "a") as f: f.write(sso + "\n")
                                 except Exception as write_err:
                                     print(f"[-] 写入文件失败: {write_err}")
-                                    email_service.delete_email(email)
+                                    safe_delete_email(email_service, email, debug_mode)
                                     current_email = None
                                     break
                                 success_count += 1
                                 avg = (time.time() - start_time) / success_count
                                 nsfw_tag = "✓" if unhinged_ok else "✗"
                                 print(f"[✓] 注册成功: {success_count}/{target_count} | {email} | SSO: {sso[:15]}... | 平均: {avg:.1f}s | NSFW: {nsfw_tag}")
-                                email_service.delete_email(email)
+                                safe_delete_email(email_service, email, debug_mode)
                                 current_email = None
                                 if success_count >= target_count and not stop_event.is_set():
                                     stop_event.set()
@@ -366,7 +510,7 @@ def register_single_thread(debug_mode=False, single_run=False):
                     time.sleep(3)
                 else:
                     # 如果重试 3 次都失败 (for 循环没有被 break)
-                    email_service.delete_email(email)
+                    safe_delete_email(email_service, email, debug_mode)
                     current_email = None
                     time.sleep(5)
 
@@ -377,7 +521,7 @@ def register_single_thread(debug_mode=False, single_run=False):
             # 异常时确保删除邮箱
             if current_email:
                 try:
-                    email_service.delete_email(current_email)
+                    safe_delete_email(email_service, current_email, debug_mode)
                 except Exception as del_err:
                     if debug_mode:
                         print(f"[DEBUG] [{thread_id}] 删除邮箱失败: {del_err}")
@@ -396,7 +540,20 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60 + "\nGrok 注册机\n" + "=" * 60)
-    
+
+    # 显示验证码获取方式配置
+    if GO_IMAP_SERVICE_URL:
+        print(f"[*] Go IMAP 服务: {GO_IMAP_SERVICE_URL}")
+    if USE_GO_IMAP == "true":
+        print("[*] 验证码获取方式: Go IMAP (仅)")
+    elif USE_GO_IMAP == "false":
+        print("[*] 验证码获取方式: FreeMail (仅)")
+    else:
+        if GO_IMAP_SERVICE_URL:
+            print("[*] 验证码获取方式: 自动 (优先 Go IMAP，回退 FreeMail)")
+        else:
+            print("[*] 验证码获取方式: FreeMail")
+
     # 1. 扫描参数
     print("[*] 正在初始化...")
     start_url = site_url
